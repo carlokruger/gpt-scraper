@@ -1,0 +1,19 @@
+{
+  "name": "gpt-scraper",
+  "version": "1.0.0",
+  "description": "Scrape ChatGPT project conversations to markdown files",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "login": "tsx src/login.ts",
+    "scrape": "tsx src/scraper.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.6.0",
+    "typescript": "^5.3.0"
+  }
+}
