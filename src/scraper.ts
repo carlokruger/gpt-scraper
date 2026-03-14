@@ -13,6 +13,46 @@ function sanitizeFilename(name: string): string {
     .slice(0, 50);
 }
 
+function isConversationUrl(url: string): boolean {
+  return /\/c\/[^/?#]+/.test(url);
+}
+
+function isProjectUrl(url: string): boolean {
+  return /\/project\/[^/?#]+/.test(url);
+}
+
+function extractConversationId(url: string): string {
+  return url.match(/\/c\/([^/?#]+)/)?.[1] || 'conversation';
+}
+
+function authRequiredForTarget(targetUrl: string, currentUrl: string): boolean {
+  try {
+    const current = new URL(currentUrl);
+
+    if (current.searchParams.has('refresh_account')) {
+      return true;
+    }
+
+    if (current.pathname.includes('/auth') || current.pathname.includes('/login')) {
+      return true;
+    }
+
+    if (isConversationUrl(targetUrl) && !isConversationUrl(currentUrl)) {
+      return true;
+    }
+
+    if (isProjectUrl(targetUrl) && !isProjectUrl(currentUrl)) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return currentUrl.includes('refresh_account') ||
+           currentUrl.includes('auth') ||
+           currentUrl.includes('login');
+  }
+}
+
 async function downloadImage(
   page: Page,
   imageUrl: string,
@@ -220,6 +260,56 @@ function formatConversationAsMarkdown(conversation: Conversation): string {
   return md;
 }
 
+function saveConversationMarkdown(
+  outputDir: string,
+  conversation: Conversation,
+  index: number
+): string {
+  const filename = `conversation-${index}-${sanitizeFilename(conversation.title)}.md`;
+  const filepath = path.join(outputDir, filename);
+  const markdown = formatConversationAsMarkdown(conversation);
+  fs.writeFileSync(filepath, markdown);
+  return filename;
+}
+
+async function extractProjectName(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const titleEl = document.querySelector(
+      '[data-testid="project-title"], nav [aria-current="page"], aside [aria-current="page"], h1'
+    );
+    const title = titleEl?.textContent?.trim();
+    if (title) {
+      return title;
+    }
+
+    const docTitle = document.title.replace(/\s*\|\s*ChatGPT.*$/i, '').trim();
+    return docTitle || 'chatgpt-project';
+  });
+}
+
+async function extractConversationTitle(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const docTitle = document.title.replace(/\s*\|\s*ChatGPT.*$/i, '').trim();
+    if (docTitle) {
+      return docTitle;
+    }
+
+    const titleEl = document.querySelector('main h1, h1');
+    const visibleTitle = titleEl?.textContent?.trim();
+    if (visibleTitle) {
+      return visibleTitle;
+    }
+
+    const firstUserMessage = document.querySelector('[data-message-author-role="user"]');
+    const fallbackText = firstUserMessage?.textContent?.trim();
+    if (fallbackText) {
+      return fallbackText.split('\n')[0].slice(0, 80);
+    }
+
+    return 'chatgpt-conversation';
+  });
+}
+
 async function scrapeProject(projectUrl: string): Promise<void> {
   console.log('🚀 Starting ChatGPT Project Scraper\n');
 
@@ -258,17 +348,17 @@ async function scrapeProject(projectUrl: string): Promise<void> {
     console.log(`📍 Current page: ${currentUrl}`);
 
     // Check if we got redirected to login
-    if (currentUrl.includes('auth') || currentUrl.includes('login')) {
+    if (authRequiredForTarget(projectUrl, currentUrl)) {
       console.log('\n❌ Not logged in! Run "npm run login" first to authenticate.');
       return;
     }
 
-    // Extract project name from URL or page
-    const projectName = await page.evaluate(() => {
-      // Try to find project name in the UI
-      const titleEl = document.querySelector('h1, [data-testid="project-title"], [class*="project"] h1');
-      return titleEl?.textContent?.trim() || 'chatgpt-project';
-    });
+    const directConversation = isConversationUrl(projectUrl);
+
+    // Extract output folder name from the current page
+    const projectName = directConversation
+      ? await extractConversationTitle(page)
+      : await extractProjectName(page);
 
     const sanitizedProjectName = sanitizeFilename(projectName);
     console.log(`📋 Project: ${projectName}\n`);
@@ -277,6 +367,26 @@ async function scrapeProject(projectUrl: string): Promise<void> {
     const outputDir = path.join(process.cwd(), 'output', sanitizedProjectName);
     const imagesDir = path.join(outputDir, 'images');
     fs.mkdirSync(imagesDir, { recursive: true });
+
+    if (directConversation) {
+      const conversationTitle = await extractConversationTitle(page);
+      console.log(`📝 Exporting single conversation: ${conversationTitle}`);
+
+      const messages = await extractMessages(page, imagesDir, 1);
+      console.log(`   Extracted ${messages.length} message(s)`);
+
+      const conversation: Conversation = {
+        id: extractConversationId(currentUrl),
+        title: conversationTitle,
+        messages,
+      };
+
+      const filename = saveConversationMarkdown(outputDir, conversation, 1);
+      console.log(`  ✓ Saved: ${filename}`);
+      console.log(`    Messages: ${messages.length}, Images: ${messages.reduce((acc, m) => acc + m.images.length, 0)}`);
+      console.log(`\n✅ Done! Output saved to: ${outputDir}`);
+      return;
+    }
 
     // Extract conversation links
     console.log('\n🔍 Scanning page for conversations...');
@@ -318,12 +428,7 @@ async function scrapeProject(projectUrl: string): Promise<void> {
           messages,
         };
 
-        // Save markdown file
-        const filename = `conversation-${i + 1}-${sanitizeFilename(link.title)}.md`;
-        const filepath = path.join(outputDir, filename);
-        const markdown = formatConversationAsMarkdown(conversation);
-        fs.writeFileSync(filepath, markdown);
-
+        const filename = saveConversationMarkdown(outputDir, conversation, i + 1);
         console.log(`  ✓ Saved: ${filename}`);
         console.log(`    Messages: ${messages.length}, Images: ${messages.reduce((acc, m) => acc + m.images.length, 0)}`);
       } catch (error) {
